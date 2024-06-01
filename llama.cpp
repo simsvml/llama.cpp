@@ -190,6 +190,7 @@ static std::string format(const char * fmt, ...) {
 
 enum llm_arch {
     LLM_ARCH_LLAMA,
+    LLM_ARCH_LLAMA_WITH_LORA,
     LLM_ARCH_FALCON,
     LLM_ARCH_BAICHUAN,
     LLM_ARCH_GROK,
@@ -228,6 +229,7 @@ enum llm_arch {
 
 static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
     { LLM_ARCH_LLAMA,           "llama"        },
+    { LLM_ARCH_LLAMA_WITH_LORA, "llamawithlora"},
     { LLM_ARCH_FALCON,          "falcon"       },
     { LLM_ARCH_GROK,            "grok"         },
     { LLM_ARCH_GPT2,            "gpt2"         },
@@ -501,6 +503,32 @@ enum llm_tensor {
 static const std::map<llm_arch, std::map<llm_tensor, std::string>> LLM_TENSOR_NAMES = {
     {
         LLM_ARCH_LLAMA,
+        {
+            { LLM_TENSOR_TOKEN_EMBD,      "token_embd" },
+            { LLM_TENSOR_OUTPUT_NORM,     "output_norm" },
+            { LLM_TENSOR_OUTPUT,          "output" },
+            { LLM_TENSOR_ROPE_FREQS,      "rope_freqs" },
+            { LLM_TENSOR_ATTN_NORM,       "blk.%d.attn_norm" },
+            { LLM_TENSOR_ATTN_Q,          "blk.%d.attn_q" },
+            { LLM_TENSOR_ATTN_K,          "blk.%d.attn_k" },
+            { LLM_TENSOR_ATTN_V,          "blk.%d.attn_v" },
+            { LLM_TENSOR_ATTN_OUT,        "blk.%d.attn_output" },
+            { LLM_TENSOR_ATTN_ROT_EMBD,   "blk.%d.attn_rot_embd" },
+            { LLM_TENSOR_FFN_GATE_INP,    "blk.%d.ffn_gate_inp" },
+            { LLM_TENSOR_FFN_NORM,        "blk.%d.ffn_norm" },
+            { LLM_TENSOR_FFN_GATE,        "blk.%d.ffn_gate" },
+            { LLM_TENSOR_FFN_DOWN,        "blk.%d.ffn_down" },
+            { LLM_TENSOR_FFN_UP,          "blk.%d.ffn_up" },
+            { LLM_TENSOR_FFN_GATE_EXP,    "blk.%d.ffn_gate.%d" },
+            { LLM_TENSOR_FFN_DOWN_EXP,    "blk.%d.ffn_down.%d" },
+            { LLM_TENSOR_FFN_UP_EXP,      "blk.%d.ffn_up.%d" },
+            { LLM_TENSOR_FFN_GATE_EXPS,   "blk.%d.ffn_gate_exps" },
+            { LLM_TENSOR_FFN_DOWN_EXPS,   "blk.%d.ffn_down_exps" },
+            { LLM_TENSOR_FFN_UP_EXPS,     "blk.%d.ffn_up_exps" },
+        },
+    },
+    {
+        LLM_ARCH_LLAMA_WITH_LORA,
         {
             { LLM_TENSOR_TOKEN_EMBD,      "token_embd" },
             { LLM_TENSOR_OUTPUT_NORM,     "output_norm" },
@@ -4031,7 +4059,7 @@ static void llm_load_hparams(
 
         ml.get_key(LLM_KV_ROPE_DIMENSION_COUNT, hparams.n_rot, false);
 
-        if (model.arch == LLM_ARCH_LLAMA || model.arch == LLM_ARCH_FALCON) {
+        if (model.arch == LLM_ARCH_LLAMA || model.arch == LLM_ARCH_LLAMA_WITH_LORA || model.arch == LLM_ARCH_FALCON) {
             if (hparams.n_rot != hparams.n_embd / hparams.n_head) {
                 throw std::runtime_error(format("invalid n_rot: %u, expected %u", hparams.n_rot, hparams.n_embd / hparams.n_head));
             }
@@ -4049,6 +4077,7 @@ static void llm_load_hparams(
     // arch-specific KVs
     switch (model.arch) {
         case LLM_ARCH_LLAMA:
+        case LLM_ARCH_LLAMA_WITH_LORA:
             {
                 ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
 
@@ -4563,7 +4592,7 @@ static void llm_load_vocab(
                 [](unsigned char c){ return std::tolower(c); });
 
             if (gen_name.find("code") != std::string::npos) {
-                if (model.arch == LLM_ARCH_LLAMA) {
+                if (model.arch == LLM_ARCH_LLAMA || model.arch == LLM_ARCH_LLAMA_WITH_LORA) {
                     vocab.special_prefix_id = 32007;
                     vocab.special_suffix_id = 32008;
                     vocab.special_middle_id = 32009;
@@ -5121,6 +5150,7 @@ static bool llm_load_tensors(
         const auto tn = LLM_TN(model.arch);
         switch (model.arch) {
             case LLM_ARCH_LLAMA:
+            case LLM_ARCH_LLAMA_WITH_LORA:
             case LLM_ARCH_REFACT:
             case LLM_ARCH_MINICPM:
                 {
@@ -6523,7 +6553,7 @@ static int llama_model_load(const std::string & fname, llama_model & model, llam
 
 #ifdef GGML_USE_KOMPUTE
         if (params.n_gpu_layers > 0 && (
-            !(model.arch == LLM_ARCH_LLAMA || model.arch == LLM_ARCH_FALCON)
+            !(model.arch == LLM_ARCH_LLAMA || model.arch == LLM_ARCH_LLAMA_WITH_LORA || model.arch == LLM_ARCH_FALCON)
             || !(
                 model.ftype == LLAMA_FTYPE_ALL_F32 ||
                 model.ftype == LLAMA_FTYPE_MOSTLY_F16 ||
@@ -11477,6 +11507,11 @@ static struct ggml_cgraph * llama_build_graph(
         case LLM_ARCH_LLAMA:
             {
                 result = llm.build_llama();
+            } break;
+        case LLM_ARCH_LLAMA_WITH_LORA:
+            {
+                result = llm.build_llama();
+                // TODO: result = llm.build_llama_with_lora();
             } break;
         case LLM_ARCH_BAICHUAN:
             {
@@ -16588,6 +16623,7 @@ enum llama_rope_type llama_rope_type(const struct llama_model * model) {
 
         // use what we call a normal RoPE, operating on pairs of consecutive head values
         case LLM_ARCH_LLAMA:
+        case LLM_ARCH_LLAMA_WITH_LORA:
         case LLM_ARCH_BAICHUAN:
         case LLM_ARCH_STARCODER:
         case LLM_ARCH_PLAMO:
