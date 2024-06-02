@@ -2025,6 +2025,15 @@ struct llama_layer {
     struct ggml_tensor * wkv_a_mqa;
     struct ggml_tensor * wkv_b;
 
+    struct ggml_tensor * wq_lora_a;
+    struct ggml_tensor * wq_lora_b;
+    struct ggml_tensor * wk_lora_a;
+    struct ggml_tensor * wk_lora_b;
+    struct ggml_tensor * wv_lora_a;
+    struct ggml_tensor * wv_lora_b;
+    struct ggml_tensor * wo_lora_a;
+    struct ggml_tensor * wo_lora_b;
+
     // attention bias
     struct ggml_tensor * bq;
     struct ggml_tensor * bk;
@@ -2043,6 +2052,13 @@ struct llama_layer {
     struct ggml_tensor * ffn_gate; // w1
     struct ggml_tensor * ffn_down; // w2
     struct ggml_tensor * ffn_up;   // w3
+
+    struct ggml_tensor * ffn_gate_lora_a;
+    struct ggml_tensor * ffn_gate_lora_b;
+    struct ggml_tensor * ffn_down_lora_a;
+    struct ggml_tensor * ffn_down_lora_b;
+    struct ggml_tensor * ffn_up_lora_a;
+    struct ggml_tensor * ffn_up_lora_b;
 
     // ff MoE
     struct ggml_tensor * ffn_gate_inp;
@@ -2248,10 +2264,16 @@ struct llama_model {
     struct ggml_tensor * tok_norm;
     struct ggml_tensor * tok_norm_b;
 
+    struct ggml_tensor * tok_embd_lora_a;
+    struct ggml_tensor * tok_embd_lora_b;
+
     struct ggml_tensor * output_norm;
     struct ggml_tensor * output_norm_b;
     struct ggml_tensor * output;
     struct ggml_tensor * output_b;
+
+    struct ggml_tensor * output_lora_a;
+    struct ggml_tensor * output_lora_b;
 
     std::vector<llama_layer> layers;
 
@@ -5149,8 +5171,49 @@ static bool llm_load_tensors(
 
         const auto tn = LLM_TN(model.arch);
         switch (model.arch) {
-            case LLM_ARCH_LLAMA:
             case LLM_ARCH_LLAMA_WITH_LORA:
+                {
+                    int lora_rank = 32;     // TODO
+
+                    model.tok_embd_lora_a = ml.create_tensor(ctx_input, tn(LLM_TENSOR_TOKEN_EMBD, "weight.lora_a"), {lora_rank, n_vocab});
+                    model.tok_embd_lora_b = ml.create_tensor(ctx_input, tn(LLM_TENSOR_TOKEN_EMBD, "weight.lora_b"), {lora_rank, n_embd});
+
+                    // output
+                    {
+                        model.output_lora_a = ml.create_tensor(ctx_output_split, tn(LLM_TENSOR_OUTPUT, "weight.lora_a"), {n_embd, lora_rank});
+                        model.output_lora_b = ml.create_tensor(ctx_output_split, tn(LLM_TENSOR_OUTPUT, "weight.lora_b"), {lora_rank, n_vocab});
+                    }
+
+                    for (int i = 0; i < n_layer; ++i) {
+                        ggml_context * ctx_split = ctx_for_layer_split(i);
+
+                        auto & layer = model.layers[i];
+
+                        layer.wq_lora_a = ml.create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_Q,   "weight.lora_a", i), {n_embd, lora_rank});
+                        layer.wq_lora_b = ml.create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_Q,   "weight.lora_b", i), {lora_rank, n_embd});
+                        layer.wk_lora_a = ml.create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_K,   "weight.lora_a", i), {n_embd, lora_rank});
+                        layer.wk_lora_b = ml.create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_K,   "weight.lora_b", i), {lora_rank, n_embd_gqa});
+                        layer.wv_lora_a = ml.create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_V,   "weight.lora_a", i), {n_embd, lora_rank});
+                        layer.wv_lora_b = ml.create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_V,   "weight.lora_b", i), {lora_rank, n_embd_gqa});
+                        layer.wo_lora_a = ml.create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_OUT, "weight.lora_a", i), {n_embd, lora_rank});
+                        layer.wo_lora_b = ml.create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_OUT, "weight.lora_b", i), {lora_rank, n_embd});
+
+                        if (n_expert == 0) {
+                            layer.ffn_gate_lora_a = ml.create_tensor(ctx_split, tn(LLM_TENSOR_FFN_GATE, "weight.lora_a", i), {   n_embd, lora_rank});
+                            layer.ffn_gate_lora_b = ml.create_tensor(ctx_split, tn(LLM_TENSOR_FFN_GATE, "weight.lora_b", i), {lora_rank,      n_ff});
+                            layer.ffn_down_lora_a = ml.create_tensor(ctx_split, tn(LLM_TENSOR_FFN_DOWN, "weight.lora_a", i), {     n_ff, lora_rank});
+                            layer.ffn_down_lora_b = ml.create_tensor(ctx_split, tn(LLM_TENSOR_FFN_DOWN, "weight.lora_b", i), {lora_rank,    n_embd});
+                            layer.ffn_up_lora_a   = ml.create_tensor(ctx_split, tn(LLM_TENSOR_FFN_UP,   "weight.lora_a", i), {   n_embd, lora_rank});
+                            layer.ffn_up_lora_b   = ml.create_tensor(ctx_split, tn(LLM_TENSOR_FFN_UP,   "weight.lora_b", i), {lora_rank,      n_ff});
+                        } else {
+                            throw std::runtime_error("llamawithlora model cannot have experts");
+                        }
+                    }
+                }
+                /* FALLTHRU */
+                // LLM_ARCH_LLAMA case will load the base model's tensors.
+
+            case LLM_ARCH_LLAMA:
             case LLM_ARCH_REFACT:
             case LLM_ARCH_MINICPM:
                 {
