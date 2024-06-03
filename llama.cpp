@@ -2025,14 +2025,14 @@ struct llama_layer {
     struct ggml_tensor * wkv_a_mqa;
     struct ggml_tensor * wkv_b;
 
-    struct ggml_tensor * wq_lora_a;
-    struct ggml_tensor * wq_lora_b;
-    struct ggml_tensor * wk_lora_a;
-    struct ggml_tensor * wk_lora_b;
-    struct ggml_tensor * wv_lora_a;
-    struct ggml_tensor * wv_lora_b;
-    struct ggml_tensor * wo_lora_a;
-    struct ggml_tensor * wo_lora_b;
+    struct ggml_tensor * wq_lora_a = nullptr;
+    struct ggml_tensor * wq_lora_b = nullptr;
+    struct ggml_tensor * wk_lora_a = nullptr;
+    struct ggml_tensor * wk_lora_b = nullptr;
+    struct ggml_tensor * wv_lora_a = nullptr;
+    struct ggml_tensor * wv_lora_b = nullptr;
+    struct ggml_tensor * wo_lora_a = nullptr;
+    struct ggml_tensor * wo_lora_b = nullptr;
 
     // attention bias
     struct ggml_tensor * bq;
@@ -2053,12 +2053,12 @@ struct llama_layer {
     struct ggml_tensor * ffn_down; // w2
     struct ggml_tensor * ffn_up;   // w3
 
-    struct ggml_tensor * ffn_gate_lora_a;
-    struct ggml_tensor * ffn_gate_lora_b;
-    struct ggml_tensor * ffn_down_lora_a;
-    struct ggml_tensor * ffn_down_lora_b;
-    struct ggml_tensor * ffn_up_lora_a;
-    struct ggml_tensor * ffn_up_lora_b;
+    struct ggml_tensor * ffn_gate_lora_a = nullptr;
+    struct ggml_tensor * ffn_gate_lora_b = nullptr;
+    struct ggml_tensor * ffn_down_lora_a = nullptr;
+    struct ggml_tensor * ffn_down_lora_b = nullptr;
+    struct ggml_tensor * ffn_up_lora_a = nullptr;
+    struct ggml_tensor * ffn_up_lora_b = nullptr;
 
     // ff MoE
     struct ggml_tensor * ffn_gate_inp;
@@ -2264,16 +2264,16 @@ struct llama_model {
     struct ggml_tensor * tok_norm;
     struct ggml_tensor * tok_norm_b;
 
-    struct ggml_tensor * tok_embd_lora_a;
-    struct ggml_tensor * tok_embd_lora_b;
+    struct ggml_tensor * tok_embd_lora_a = nullptr;
+    struct ggml_tensor * tok_embd_lora_b = nullptr;
 
     struct ggml_tensor * output_norm;
     struct ggml_tensor * output_norm_b;
     struct ggml_tensor * output;
     struct ggml_tensor * output_b;
 
-    struct ggml_tensor * output_lora_a;
-    struct ggml_tensor * output_lora_b;
+    struct ggml_tensor * output_lora_a = nullptr;
+    struct ggml_tensor * output_lora_b = nullptr;
 
     std::vector<llama_layer> layers;
 
@@ -6678,12 +6678,14 @@ enum llm_norm_type {
     LLM_NORM_RMS,
 };
 
-static struct ggml_tensor * llm_build_inp_embd(
+static struct ggml_tensor * llm_build_inp_embd_with_lora(
         struct ggml_context * ctx,
        struct llama_context & lctx,
         const llama_hparams & hparams,
           const llama_batch & batch,
          struct ggml_tensor * tok_embd,
+         struct ggml_tensor * tok_embd_lora_a,
+         struct ggml_tensor * tok_embd_lora_b,
          const llm_build_cb & cb) {
     const int64_t n_embd = hparams.n_embd;
 
@@ -6695,6 +6697,12 @@ static struct ggml_tensor * llm_build_inp_embd(
         ggml_set_input(lctx.inp_tokens);
 
         inpL = ggml_get_rows(ctx, tok_embd, lctx.inp_tokens);
+
+        if (tok_embd_lora_a && tok_embd_lora_b) {
+            struct ggml_tensor * inpL_lora = ggml_get_rows(ctx, tok_embd_lora_a, lctx.inp_tokens);
+            inpL_lora = ggml_mul_mat(ctx, tok_embd_lora_b, inpL_lora);
+            inpL = ggml_add(ctx, inpL, inpL_lora);
+        }
     } else {
        lctx.inp_embd = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, batch.n_tokens);
         inpL = lctx.inp_embd;
@@ -6704,6 +6712,19 @@ static struct ggml_tensor * llm_build_inp_embd(
     cb(inpL, "inp_embd", -1);
 
     return inpL;
+}
+
+static struct ggml_tensor * llm_build_inp_embd(
+        struct ggml_context * ctx,
+       struct llama_context & lctx,
+        const llama_hparams & hparams,
+          const llama_batch & batch,
+         struct ggml_tensor * tok_embd,
+         const llm_build_cb & cb) {
+    return llm_build_inp_embd_with_lora(
+        ctx, lctx, hparams, batch,
+        tok_embd, nullptr, nullptr,
+        cb);
 }
 
 static void llm_build_kv_store(
@@ -6784,21 +6805,46 @@ static struct ggml_tensor * llm_build_norm(
     return cur;
 }
 
-static struct ggml_tensor * llm_build_ffn(
+static struct ggml_tensor * llm_mul_mat_with_lora(
+        struct ggml_context * ctx,
+         struct ggml_tensor * m,
+         struct ggml_tensor * lora_a,
+         struct ggml_tensor * lora_b,
+         struct ggml_tensor * in) {
+    struct ggml_tensor * out = ggml_mul_mat(ctx, m, in);
+
+    if (lora_a && lora_b) {
+        struct ggml_tensor * lora_out = ggml_mul_mat(ctx, lora_a, in);
+        lora_out = ggml_mul_mat(ctx, lora_b, lora_out);
+        out = ggml_add(ctx, out, lora_out);
+    }
+
+    return out;
+}
+
+
+
+static struct ggml_tensor * llm_build_ffn_with_lora(
         struct ggml_context * ctx,
          struct ggml_tensor * cur,
          struct ggml_tensor * up,
          struct ggml_tensor * up_b,
+         struct ggml_tensor * up_lora_a,
+         struct ggml_tensor * up_lora_b,
          struct ggml_tensor * gate,
          struct ggml_tensor * gate_b,
+         struct ggml_tensor * gate_lora_a,
+         struct ggml_tensor * gate_lora_b,
          struct ggml_tensor * down,
          struct ggml_tensor * down_b,
+         struct ggml_tensor * down_lora_a,
+         struct ggml_tensor * down_lora_b,
          struct ggml_tensor * act_scales,
             llm_ffn_op_type   type_op,
           llm_ffn_gate_type   type_gate,
          const llm_build_cb & cb,
                         int   il) {
-    struct ggml_tensor * tmp = up ? ggml_mul_mat(ctx, up, cur) : cur;
+    struct ggml_tensor * tmp = up ? llm_mul_mat_with_lora(ctx, up, up_lora_a, up_lora_b, cur) : cur;
     cb(tmp, "ffn_up", il);
 
     if (up_b) {
@@ -6810,12 +6856,12 @@ static struct ggml_tensor * llm_build_ffn(
         switch (type_gate) {
             case LLM_FFN_SEQ:
                 {
-                    cur = ggml_mul_mat(ctx, gate, tmp);
+                    cur = llm_mul_mat_with_lora(ctx, gate, gate_lora_a, gate_lora_b, tmp);
                     cb(cur, "ffn_gate", il);
                 } break;
             case LLM_FFN_PAR:
                 {
-                    cur = ggml_mul_mat(ctx, gate, cur);
+                    cur = llm_mul_mat_with_lora(ctx, gate, gate_lora_a, gate_lora_b, cur);
                     cb(cur, "ffn_gate", il);
                 } break;
         }
@@ -6863,7 +6909,7 @@ static struct ggml_tensor * llm_build_ffn(
         cb(cur, "ffn_gate_par", il);
     }
 
-    cur = ggml_mul_mat(ctx, down, cur);
+    cur = llm_mul_mat_with_lora(ctx, down, down_lora_a, down_lora_b, cur);
     if (down_b) {
         cb(cur, "ffn_down", il);
     }
@@ -6873,6 +6919,29 @@ static struct ggml_tensor * llm_build_ffn(
     }
 
     return cur;
+}
+
+static struct ggml_tensor * llm_build_ffn(
+        struct ggml_context * ctx,
+         struct ggml_tensor * cur,
+         struct ggml_tensor * up,
+         struct ggml_tensor * up_b,
+         struct ggml_tensor * gate,
+         struct ggml_tensor * gate_b,
+         struct ggml_tensor * down,
+         struct ggml_tensor * down_b,
+         struct ggml_tensor * act_scales,
+            llm_ffn_op_type   type_op,
+          llm_ffn_gate_type   type_gate,
+         const llm_build_cb & cb,
+                        int   il) {
+    return llm_build_ffn_with_lora(
+        ctx, cur,
+        up,   up_b,    nullptr, nullptr,
+        gate, gate_b,  nullptr, nullptr,
+        down, down_b,  nullptr, nullptr,
+        act_scales, type_op, type_gate,
+        cb, il);
 }
 
 static struct ggml_tensor * llm_build_moe_ffn(
@@ -7454,7 +7523,8 @@ struct llm_build_context {
         struct ggml_tensor * cur;
         struct ggml_tensor * inpL;
 
-        inpL = llm_build_inp_embd(ctx0, lctx, hparams, batch, model.tok_embd, cb);
+        inpL = llm_build_inp_embd_with_lora(ctx0, lctx, hparams, batch,
+                model.tok_embd, model.tok_embd_lora_a, model.tok_embd_lora_b, cb);
 
         // inp_pos - contains the positions
         struct ggml_tensor * inp_pos = build_inp_pos();
@@ -7474,21 +7544,24 @@ struct llm_build_context {
             // self-attention
             {
                 // compute Q and K and RoPE them
-                struct ggml_tensor * Qcur = ggml_mul_mat(ctx0, model.layers[il].wq, cur);
+                struct ggml_tensor * Qcur = llm_mul_mat_with_lora(ctx0, model.layers[il].wq,
+                        model.layers[il].wq_lora_a, model.layers[il].wq_lora_b, cur);
                 cb(Qcur, "Qcur", il);
                 if (model.layers[il].bq) {
                     Qcur = ggml_add(ctx0, Qcur, model.layers[il].bq);
                     cb(Qcur, "Qcur", il);
                 }
 
-                struct ggml_tensor * Kcur = ggml_mul_mat(ctx0, model.layers[il].wk, cur);
+                struct ggml_tensor * Kcur = llm_mul_mat_with_lora(ctx0, model.layers[il].wk,
+                        model.layers[il].wk_lora_a, model.layers[il].wk_lora_b, cur);
                 cb(Kcur, "Kcur", il);
                 if (model.layers[il].bk) {
                     Kcur = ggml_add(ctx0, Kcur, model.layers[il].bk);
                     cb(Kcur, "Kcur", il);
                 }
 
-                struct ggml_tensor * Vcur = ggml_mul_mat(ctx0, model.layers[il].wv, cur);
+                struct ggml_tensor * Vcur = llm_mul_mat_with_lora(ctx0, model.layers[il].wv,
+                        model.layers[il].wv_lora_a, model.layers[il].wv_lora_b, cur);
                 cb(Vcur, "Vcur", il);
                 if (model.layers[il].bv) {
                     Vcur = ggml_add(ctx0, Vcur, model.layers[il].bv);
@@ -7532,10 +7605,13 @@ struct llm_build_context {
                         LLM_NORM_RMS, cb, il);
                 cb(cur, "ffn_norm", il);
 
-                cur = llm_build_ffn(ctx0, cur,
-                        model.layers[il].ffn_up,   model.layers[il].ffn_up_b,
-                        model.layers[il].ffn_gate, model.layers[il].ffn_gate_b,
-                        model.layers[il].ffn_down, model.layers[il].ffn_down_b,
+                cur = llm_build_ffn_with_lora(ctx0, cur,
+                        model.layers[il].ffn_up,          model.layers[il].ffn_up_b,
+                        model.layers[il].ffn_up_lora_a,   model.layers[il].ffn_up_lora_b,
+                        model.layers[il].ffn_gate,        model.layers[il].ffn_gate_b,
+                        model.layers[il].ffn_gate_lora_a, model.layers[il].ffn_gate_lora_b,
+                        model.layers[il].ffn_down,        model.layers[il].ffn_down_b,
+                        model.layers[il].ffn_down_lora_a, model.layers[il].ffn_down_lora_b,
                         NULL,
                         LLM_FFN_SILU, LLM_FFN_PAR, cb, il);
                 cb(cur, "ffn_out", il);
@@ -7579,7 +7655,8 @@ struct llm_build_context {
         cb(cur, "result_norm", -1);
 
         // lm_head
-        cur = ggml_mul_mat(ctx0, model.output, cur);
+        cur = llm_mul_mat_with_lora(ctx0, model.output,
+                model.output_lora_a, model.output_lora_b, cur);
         cb(cur, "result_output", -1);
 
         ggml_build_forward_expand(gf, cur);
@@ -11568,13 +11645,9 @@ static struct ggml_cgraph * llama_build_graph(
 
     switch (model.arch) {
         case LLM_ARCH_LLAMA:
-            {
-                result = llm.build_llama();
-            } break;
         case LLM_ARCH_LLAMA_WITH_LORA:
             {
                 result = llm.build_llama();
-                // TODO: result = llm.build_llama_with_lora();
             } break;
         case LLM_ARCH_BAICHUAN:
             {
